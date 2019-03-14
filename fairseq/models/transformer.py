@@ -96,6 +96,10 @@ class TransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
+        parser.add_argument("--local-transformer", default=False, action="store_true",
+                            help="use the local transformer from CS224n Project")
+        parser.add_argument("--kernel-size", type=int, default=40)
+
         # fmt: on
 
     @classmethod
@@ -294,6 +298,8 @@ class TransformerEncoder(FairseqEncoder):
         self.normalize = args.encoder_normalize_before
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+        self.local_transformer = args.local_transformer
+        self.kernel_size = args.kernel_size
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -314,6 +320,15 @@ class TransformerEncoder(FairseqEncoder):
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
+
+        if self.local_transformer:
+            batch_size, src_len, d = x.size()
+            size_to_add = self.kernel_size - src_len % self.kernel_size
+            src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
+            x = F.pad(x, (0, 0, size_to_add, 0, 0, 0))
+            x = x.view(-1, self.kernel_size, d)
+            src_tokens = src_tokens.view(-1, self.kernel_size)
+
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # B x T x C -> T x B x C
@@ -330,6 +345,13 @@ class TransformerEncoder(FairseqEncoder):
 
         if self.normalize:
             x = self.layer_norm(x)
+
+        if self.local_transformer:
+
+            x = x.view(size_to_add+src_len, batch_size, -1)
+            x = x[size_to_add:, :, :]
+            encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+            encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
 
         return {
             'encoder_out': x,  # T x B x C
@@ -836,6 +858,13 @@ def transformer_lm_gbw(args):
     args.dropout = getattr(args, 'dropout', 0.1)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     transformer_lm_big(args)
+
+
+@register_model_architecture('transformer', 'local_transformer')
+def local_transformer_architecture(args):
+    args.local_transformer = True
+    args.kernel_size = getattr(args, 'kernel_size', 40)
+    base_architecture(args)
 
 
 @register_model_architecture('transformer', 'transformer')
