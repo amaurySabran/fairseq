@@ -880,6 +880,14 @@ def base_architecture(args):
     args.weight_dropout = getattr(args, 'weight_dropout', args.attention_dropout)
 
 
+
+@register_model_architecture('lightconv', 'lightconv-transformer-like')
+def lightconv_transformer_like_architecture(args):
+    args.encoder_layers = getattr(args, 'encoder_layers', 6)
+    args.encoder_kernel_size_list = getattr(args, 'encoder_kernel_size_list', [3, 7, 15, 31, 31, 31])
+    args.decoder_kernel_size_list = getattr(args, 'decoder_kernel_size_list', [3, 7, 15, 31, 31, 31])
+    base_architecture(args)
+
 @register_model_architecture('lightconv', 'lightconv_iwslt_de_en')
 def lightconv_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
