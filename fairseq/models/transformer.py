@@ -96,7 +96,7 @@ class TransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
-        parser.add_argument("--local-transformer", default=False, action="store_true",
+        parser.add_argument("--local-transformer", action="store_true", default=False,
                             help="use the local transformer from CS224n Project")
         parser.add_argument("--kernel-size", type=int, default=40)
 
@@ -298,6 +298,7 @@ class TransformerEncoder(FairseqEncoder):
         self.normalize = args.encoder_normalize_before
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+
         self.local_transformer = args.local_transformer
         self.kernel_size = args.kernel_size
 
@@ -317,16 +318,43 @@ class TransformerEncoder(FairseqEncoder):
                   padding elements of shape `(batch, src_len)`
         """
         # embed tokens and positions
-        if self.local_transformer:
-            batch_size, src_len = src_tokens.size()
 
-            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-            src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
+        # if we want to apply kernel size BEFORE positional embeddings
+        # if self.local_transformer:
+        #     batch_size, src_len = src_tokens.size()
 
-            src_tokens = src_tokens.view(-1, self.kernel_size)
+        #     size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+        #     src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
+
+        #     src_tokens = src_tokens.view(-1, self.kernel_size)
+            
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
+
+
+        batch_size, src_len, d = x.size()
+        # print("batch size {}, src_len {}".format(batch_size,src_len))
+
+        # if we want to apply kernel size AFTER positional embeddings
+        if self.local_transformer:
+            batch_size, src_len, d = x.size()
+            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+            # print("size to add", size_to_add)
+
+            # print("batch size {}, src_len {}".format(batch_size,src_len))
+            # print("size tokens", src_tokens.size())
+            src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
+            src_tokens = src_tokens.view(-1, self.kernel_size)
+            # print("size tokens", src_tokens.size())
+
+            # print("size x", x.size())
+            x = F.pad(x, (0, 0, size_to_add, 0))
+            x = x.view(-1, self.kernel_size, d)
+            # print("size x", x.size())
+        
+        # print("size of x", x.size())
+
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # B x T x C -> T x B x C
@@ -870,7 +898,7 @@ def local_transformer_architecture(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('transformer', 'transformer_2')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -951,3 +979,32 @@ def transformer_wmt_en_de_big_t2t(args):
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
+
+@register_model_architecture('transformer', 'transformer')
+@register_model_architecture('transformer', 'transformer_small')
+def transformer_small(args):
+    args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
+    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
+    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
+    args.encoder_layers = getattr(args, 'encoder_layers', 3)
+    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
+    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
+    args.encoder_learned_pos = getattr(args, 'encoder_learned_pos', False)
+    args.decoder_embed_path = getattr(args, 'decoder_embed_path', None)
+    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', args.encoder_embed_dim)
+    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', args.encoder_ffn_embed_dim)
+    args.decoder_layers = getattr(args, 'decoder_layers', 3)
+    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
+    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', False)
+    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
+    args.attention_dropout = getattr(args, 'attention_dropout', 0.)
+    args.relu_dropout = getattr(args, 'relu_dropout', 0.)
+    args.dropout = getattr(args, 'dropout', 0.1)
+    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
+    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
+    args.share_decoder_input_output_embed = getattr(args, 'share_decoder_input_output_embed', False)
+    args.share_all_embeddings = getattr(args, 'share_all_embeddings', False)
+    args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
+
+    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
+    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
