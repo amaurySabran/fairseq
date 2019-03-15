@@ -318,14 +318,11 @@ class TransformerEncoder(FairseqEncoder):
         """
         # embed tokens and positions
         if self.local_transformer:
-            # batch_size, src_len, d = x.size()
             batch_size, src_len = src_tokens.size()
-            print("batch size : {} src len {}".format(batch_size,src_len))
 
             size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
             src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
-            # x = F.pad(x, (0, 0, size_to_add, 0, 0, 0))
-            # x = x.view(-1, self.kernel_size, d)
+
             src_tokens = src_tokens.view(-1, self.kernel_size)
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
@@ -342,9 +339,6 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            if torch.isnan(x).any():
-                import pdb;
-                pdb.set_trace()
             x = layer(x, encoder_padding_mask)
             if encoder_padding_mask is not None:
                 x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
