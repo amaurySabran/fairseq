@@ -317,18 +317,19 @@ class TransformerEncoder(FairseqEncoder):
                   padding elements of shape `(batch, src_len)`
         """
         # embed tokens and positions
+        if self.local_transformer:
+            # batch_size, src_len, d = x.size()
+            batch_size, src_len = src_tokens.size()
+            print("batch size : {} src len {}".format(batch_size,src_len))
+
+            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+            src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
+            # x = F.pad(x, (0, 0, size_to_add, 0, 0, 0))
+            # x = x.view(-1, self.kernel_size, d)
+            src_tokens = src_tokens.view(-1, self.kernel_size)
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
-
-        if self.local_transformer:
-            batch_size, src_len, d = x.size()
-            size_to_add = self.kernel_size - src_len % self.kernel_size
-            src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
-            x = F.pad(x, (0, 0, size_to_add, 0, 0, 0))
-            x = x.view(-1, self.kernel_size, d)
-            src_tokens = src_tokens.view(-1, self.kernel_size)
-
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # B x T x C -> T x B x C
@@ -341,17 +342,25 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
+            if torch.isnan(x).any():
+                import pdb;
+                pdb.set_trace()
             x = layer(x, encoder_padding_mask)
+            if encoder_padding_mask is not None:
+                x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
 
-        if self.normalize:
-            x = self.layer_norm(x)
 
         if self.local_transformer:
 
             x = x.view(size_to_add+src_len, batch_size, -1)
             x = x[size_to_add:, :, :]
-            encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-            encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
+            if encoder_padding_mask is not None:
+                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+                encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
+
+        if self.normalize:
+            x = self.layer_norm(x)
+
 
         return {
             'encoder_out': x,  # T x B x C

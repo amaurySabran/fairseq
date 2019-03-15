@@ -61,16 +61,16 @@ class Trainer(object):
         self.meters['train_nll_loss'] = AverageMeter()
         self.meters['valid_loss'] = AverageMeter()
         self.meters['valid_nll_loss'] = AverageMeter()
-        self.meters['wps'] = TimeMeter()       # words per second
-        self.meters['ups'] = TimeMeter()       # updates per second
-        self.meters['wpb'] = AverageMeter()    # words per batch
-        self.meters['bsz'] = AverageMeter()    # sentences per batch
+        self.meters['wps'] = TimeMeter()  # words per second
+        self.meters['ups'] = TimeMeter()  # updates per second
+        self.meters['wpb'] = AverageMeter()  # words per batch
+        self.meters['bsz'] = AverageMeter()  # sentences per batch
         self.meters['gnorm'] = AverageMeter()  # gradient norm
-        self.meters['clip'] = AverageMeter()   # % of updates clipped
-        self.meters['oom'] = AverageMeter()    # out of memory
+        self.meters['clip'] = AverageMeter()  # % of updates clipped
+        self.meters['oom'] = AverageMeter()  # out of memory
         if args.fp16:
             self.meters['loss_scale'] = AverageMeter()  # dynamic loss scale
-        self.meters['wall'] = TimeMeter()      # wall time in seconds
+        self.meters['wall'] = TimeMeter()  # wall time in seconds
         self.meters['train_wall'] = StopwatchMeter()  # train wall time in seconds
 
     @property
@@ -240,9 +240,9 @@ class Trainer(object):
 
         if not all(k in logging_output for k in ['ntokens', 'nsentences']):
             raise Exception((
-                'Please update the {}.aggregate_logging_outputs() method to '
-                'return ntokens and nsentences'
-            ).format(self.task.__class__.__name__))
+                                'Please update the {}.aggregate_logging_outputs() method to '
+                                'return ntokens and nsentences'
+                            ).format(self.task.__class__.__name__))
 
         try:
             # normalize grads by sample size
@@ -250,6 +250,10 @@ class Trainer(object):
 
             # clip grads
             grad_norm = self.optimizer.clip_grad_norm(self.args.clip_norm)
+            if grad_norm != grad_norm:
+                print('| WARNING: NaN grad, skipping batch')
+                self.optimizer.zero_grad()
+                grad_norm = -1
             self._prev_grad_norm = grad_norm
 
             # take an optimization step
