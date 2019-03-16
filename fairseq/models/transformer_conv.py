@@ -98,7 +98,7 @@ class TransformerConvModel(FairseqModel):
                             help='sets adaptive softmax dropout for the tail projections')
 
         parser.add_argument('--kernel-size', type=int, default = 4)
-        parser.add_argument('--deconv', default=False, action='store_true',)
+        parser.add_argument('--deconv', default=False, action='store_true')
         # fmt: on
 
     @classmethod
@@ -922,6 +922,10 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
+    args.kernel_size = getattr(args, 'kernel_size', 4)
+    args.deconv = getattr(args, 'deconv', False)
+
+
 
 @register_model_architecture('transformer_conv', 'transformer_conv_iwslt_de_en')
 def transformer_conv_iwslt_de_en(args):
@@ -1005,3 +1009,6 @@ def transformer_conv_small(args):
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
+
+    args.kernel_size = getattr(args, 'kernel_size', 4)
+    args.deconv = getattr(args, 'deconv', False)

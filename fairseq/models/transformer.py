@@ -328,7 +328,7 @@ class TransformerEncoder(FairseqEncoder):
             x += self.embed_positions(src_tokens)
 
         batch_size, src_len, d = x.size()
-        print("batch size {}, src len {}, d {}".format(batch_size, src_len, d))
+        # print("batch size {}, src len {}, d {}".format(batch_size, src_len, d))
 
         # if we want to apply kernel size AFTER positional embeddings
         if self.local_transformer:
@@ -936,6 +936,11 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
+    args.propagation = getattr(args, "propagation", False)
+    args.kernel_size = getattr(args, 'kernel_size', 40)
+    args.local_transformer = getattr(args, "local_transformer", False)
+
+
 
 @register_model_architecture('transformer', 'transformer_iwslt_de_en')
 def transformer_iwslt_de_en(args):
@@ -1018,3 +1023,7 @@ def transformer_small(args):
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
+    
+    args.propagation = getattr(args, "propagation", False)
+    args.kernel_size = getattr(args, 'kernel_size', 40)
+    args.local_transformer = getattr(args, "local_transformer", False)
