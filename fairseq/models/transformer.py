@@ -324,6 +324,8 @@ class TransformerEncoder(FairseqEncoder):
             src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
 
             src_tokens = src_tokens.view(-1, self.kernel_size)
+
+
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
@@ -340,8 +342,8 @@ class TransformerEncoder(FairseqEncoder):
         # encoder layers
         for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-            if encoder_padding_mask is not None:
-                x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
+        if encoder_padding_mask is not None:
+            x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans, useful for batches with only pad indices
 
 
         if self.local_transformer:

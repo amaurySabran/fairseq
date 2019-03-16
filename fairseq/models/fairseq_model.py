@@ -151,6 +151,7 @@ class FairseqModel(BaseFairseqModel):
 
         self.encoder = encoder
         self.decoder = decoder
+        # self.counter=0
         assert isinstance(self.encoder, FairseqEncoder)
         assert isinstance(self.decoder, FairseqDecoder)
 
@@ -177,6 +178,10 @@ class FairseqModel(BaseFairseqModel):
         """
         encoder_out = self.encoder(src_tokens, src_lengths)
         decoder_out = self.decoder(prev_output_tokens, encoder_out)
+        # self.counter+=1
+        # if self.counter>14:
+        #     import pdb;
+        #     pdb.set_trace()
         return decoder_out
 
     def max_positions(self):
