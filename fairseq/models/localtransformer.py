@@ -19,21 +19,19 @@ from fairseq.modules import (
     SinusoidalPositionalEmbedding
 )
 
-from . import (
-    FairseqIncrementalDecoder, FairseqEncoder, FairseqLanguageModel, FairseqModel, register_model,
-    register_model_architecture,
-)
+from fairseq.models import FairseqIncrementalDecoder, FairseqEncoder, FairseqLanguageModel, \
+FairseqModel, register_model, register_model_architecture
 
 
-@register_model('transformer')
-class TransformerModel(FairseqModel):
+@register_model('localtransformer')
+class LocalTransformerModel(FairseqModel):
     """
     Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
 
     Args:
-        encoder (TransformerEncoder): the encoder
-        decoder (TransformerDecoder): the decoder
+        encoder (LocalTransformerEncoder): the encoder
+        decoder (LocalTransformerDecoder): the decoder
 
     The Transformer model provides the following named architectures and
     command-line arguments:
@@ -96,12 +94,8 @@ class TransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
-        parser.add_argument("--local-transformer", action="store_true", default=False,
-                            help="use the local transformer from CS224n Project")
-        parser.add_argument("--kernel-size", type=int, default=40)
-        parser.add_argument("--propagation", action="store_true", default=False,
-                            help="Shift the kernels so that information uses the several layers \
-                            to propagate between the kernels")
+        parser.add_argument('--kernel_size', type=int, help='size of kernel')
+        parser.add_argument('--use_local_decoder', default=False, action='store_true')
 
         # fmt: on
 
@@ -151,12 +145,12 @@ class TransformerModel(FairseqModel):
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
 
-        encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
-        decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return TransformerModel(encoder, decoder)
+        encoder = LocalTransformerEncoder(args, src_dict, encoder_embed_tokens)
+        decoder = LocalTransformerDecoder(args, tgt_dict, decoder_embed_tokens)
+        return LocalTransformerModel(encoder, decoder)
 
 
-@register_model('transformer_lm')
+@register_model('localtransformer_lm')
 class TransformerLanguageModel(FairseqLanguageModel):
     def __init__(self, decoder):
         super().__init__(decoder)
@@ -257,16 +251,16 @@ class TransformerLanguageModel(FairseqLanguageModel):
                 args.adaptive_softmax_cutoff, args.adaptive_input_cutoff)
             assert args.decoder_input_dim == args.decoder_output_dim
 
-        decoder = TransformerDecoder(
+        decoder = LocalTransformerDecoder(
             args, task.output_dictionary, embed_tokens, no_encoder_attn=True, final_norm=False,
         )
         return TransformerLanguageModel(decoder)
 
 
-class TransformerEncoder(FairseqEncoder):
+class LocalTransformerEncoder(FairseqEncoder):
     """
     Transformer encoder consisting of *args.encoder_layers* layers. Each layer
-    is a :class:`TransformerEncoderLayer`.
+    is a :class:`LocalTransformerEncoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -281,20 +275,21 @@ class TransformerEncoder(FairseqEncoder):
         self.dropout = args.dropout
 
         embed_dim = embed_tokens.embedding_dim
+        self.embed_dim = embed_dim
         self.padding_idx = embed_tokens.padding_idx
         self.max_source_positions = args.max_source_positions
 
         self.embed_tokens = embed_tokens
         self.embed_scale = math.sqrt(embed_dim)
-        self.embed_positions = PositionalEmbedding(
-            args.max_source_positions, embed_dim, self.padding_idx,
-            left_pad=left_pad,
-            learned=args.encoder_learned_pos,
-        ) if not args.no_token_positional_embeddings else None
+        # self.embed_positions = PositionalEmbedding(
+        #     args.max_source_positions, embed_dim, self.padding_idx,
+        #     left_pad=left_pad,
+        #     learned=args.encoder_learned_pos,
+        # ) if not args.no_token_positional_embeddings else None
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerEncoderLayer(args)
+            LocalTransformerEncoderLayer(args)
             for i in range(args.encoder_layers)
         ])
         self.register_buffer('version', torch.Tensor([2]))
@@ -302,9 +297,13 @@ class TransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
-        self.local_transformer = args.local_transformer
         self.kernel_size = args.kernel_size
-        self.propagation = args.propagation
+
+        self.embed_positions = PositionalEmbedding(
+            self.kernel_size, embed_dim, self.padding_idx, #normally max_source_positions instead of kernel_size
+            left_pad=left_pad,
+            learned=args.encoder_learned_pos,
+        ) if not args.no_token_positional_embeddings else None
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -321,34 +320,25 @@ class TransformerEncoder(FairseqEncoder):
                 - **encoder_padding_mask** (ByteTensor): the positions of
                   padding elements of shape `(batch, src_len)`
         """
+
+        ############################## ADDED PART ###################################################
+
+        batch_size, src_len = src_tokens.size()
+
+        size_to_add = self.kernel_size - src_len % self.kernel_size
+
+        src_tokens2 = torch.empty(batch_size, src_len+size_to_add, dtype=src_tokens.dtype, device=src_tokens.device)
+        src_tokens2.fill_(self.padding_idx)
+        src_tokens2[:batch_size, -src_len:] = src_tokens
+        src_tokens = src_tokens2.view(-1, self.kernel_size)
+
+        ############################## END ADDED PART ###################################################
+    
         # embed tokens and positions
-
-        # if we want to apply kernel size BEFORE positional embeddings
-        # if self.local_transformer:
-        #     batch_size, src_len = src_tokens.size()
-
-        #     size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-        #     src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
-
-        #     src_tokens = src_tokens.view(-1, self.kernel_size)
-            
         x = self.embed_scale * self.embed_tokens(src_tokens)
+
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
-
-        batch_size, src_len, d = x.size()
-        # print("batch size {}, src len {}, d {}".format(batch_size, src_len, d))
-
-        # if we want to apply kernel size AFTER positional embeddings
-        if self.local_transformer:
-            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-
-            src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
-            src_tokens = src_tokens.view(-1, self.kernel_size)
-
-            x = F.pad(x, (0, 0, size_to_add, 0))
-            x = x.view(-1, self.kernel_size, d)
-        
 
         x = F.dropout(x, p=self.dropout, training=self.training)
 
@@ -361,48 +351,21 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for num_layer, layer in enumerate(self.layers):
-
-            if self.local_transformer and self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)))
-                    x = x.view(self.kernel_size, -1, d)
-
-                    if encoder_padding_mask is None:
-                        encoder_padding_mask = src_tokens.eq(self.padding_idx)
-                        
-                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                    encoder_padding_mask = F.pad(encoder_padding_mask, 
-                                    (math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)), value = 1)
-                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
-                    
-
+        for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-            if encoder_padding_mask is not None:
-                x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
-
-            if self.local_transformer and self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = x[math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2),:,:].contiguous()
-                    x = x.view(self.kernel_size, -1, d)
-
-                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                    encoder_padding_mask = encoder_padding_mask[:, math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2)].contiguous()
-                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
-
-        if self.local_transformer:
-
-            x = x.view(size_to_add+src_len, batch_size, -1)
-            x = x[size_to_add:, :, :]
-            if encoder_padding_mask is not None:
-                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
 
         if self.normalize:
             x = self.layer_norm(x)
 
+        ############################## ADDED PART ###################################################
+
+        x2 = x.view(-1, batch_size, self.embed_dim)
+        x = x2[-src_len:, :, :]
+
+        encoder_padding_mask2 = encoder_padding_mask.view(batch_size, -1)
+        encoder_padding_mask = encoder_padding_mask2[:, -src_len:]
+
+        ############################## END ADDED PART ###################################################
 
         return {
             'encoder_out': x,  # T x B x C
@@ -450,10 +413,10 @@ class TransformerEncoder(FairseqEncoder):
         return state_dict
 
 
-class TransformerDecoder(FairseqIncrementalDecoder):
+class LocalTransformerDecoder(FairseqIncrementalDecoder):
     """
     Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`TransformerDecoderLayer`.
+    is a :class:`LocalTransformerDecoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -477,6 +440,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         output_embed_dim = args.decoder_output_dim
 
         padding_idx = embed_tokens.padding_idx
+
+        self.padding_idx = padding_idx
         self.max_target_positions = args.max_target_positions
 
         self.embed_tokens = embed_tokens
@@ -485,15 +450,15 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.project_in_dim = Linear(input_embed_dim, embed_dim, bias=False) if embed_dim != input_embed_dim else None
 
         self.embed_positions = PositionalEmbedding(
-            args.max_target_positions, embed_dim, padding_idx,
+            self.max_target_positions, embed_dim, padding_idx,
             left_pad=left_pad,
             learned=args.decoder_learned_pos,
         ) if not args.no_token_positional_embeddings else None
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerDecoderLayer(args, no_encoder_attn)
-            for _ in range(args.decoder_layers)
+            LocalTransformerDecoderLayer(args, no_encoder_attn, num_layer=num_layer)
+            for num_layer in range(args.decoder_layers)
         ])
 
         self.adaptive_softmax = None
@@ -518,6 +483,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.normalize = args.decoder_normalize_before and final_norm
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
+        
 
     def forward(self, prev_output_tokens, encoder_out=None, incremental_state=None):
         """
@@ -536,7 +502,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 - the last decoder layer's attention weights of shape `(batch,
                   tgt_len, src_len)`
         """
-        # embed positions
+
         positions = self.embed_positions(
             prev_output_tokens,
             incremental_state=incremental_state,
@@ -588,7 +554,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             if self.share_input_output_embed:
                 x = F.linear(x, self.embed_tokens.weight)
             else:
-                x = F.linear(x, self.embed_out)
+                x = F.linear(x, self.embed_out)  
 
         return x, {'attn': attn, 'inner_states': inner_states}
 
@@ -636,7 +602,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
-class TransformerEncoderLayer(nn.Module):
+class LocalTransformerEncoderLayer(nn.Module):
     """Encoder layer block.
 
     In the original paper each operation (multi-head attention or FFN) is
@@ -675,6 +641,7 @@ class TransformerEncoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
+
         residual = x
         x = self.maybe_layer_norm(0, x, before=True)
         x, _ = self.self_attn(query=x, key=x, value=x, key_padding_mask=encoder_padding_mask)
@@ -700,7 +667,7 @@ class TransformerEncoderLayer(nn.Module):
             return x
 
 
-class TransformerDecoderLayer(nn.Module):
+class LocalTransformerDecoderLayer(nn.Module):
     """Decoder layer block.
 
     In the original paper each operation (multi-head attention, encoder
@@ -717,7 +684,7 @@ class TransformerDecoderLayer(nn.Module):
             (default: False).
     """
 
-    def __init__(self, args, no_encoder_attn=False):
+    def __init__(self, args, no_encoder_attn=False, num_layer=0):
         super().__init__()
         self.embed_dim = args.decoder_embed_dim
         self.self_attn = MultiheadAttention(
@@ -748,6 +715,15 @@ class TransformerDecoderLayer(nn.Module):
 
         self.onnx_trace = False
 
+        self.kernel_size = args.kernel_size
+        self.padding_idx = 1
+
+        self.use_local_decoder = args.use_local_decoder
+
+        if type(self.kernel_size) == list:
+            self.kernel_size = self.kernel_size[num_layer]
+        
+
     def prepare_for_onnx_export_(self):
         self.onnx_trace = True
 
@@ -763,6 +739,29 @@ class TransformerDecoderLayer(nn.Module):
         Returns:
             encoded output of shape `(batch, src_len, embed_dim)`
         """
+
+        ############################# ADDED PART ####################################
+        #For self attention
+
+        if self.use_local_decoder:
+            tgt_len, batch_size, embed_dim = x.size()
+
+            size_to_add = self.kernel_size - tgt_len % self.kernel_size
+
+            x2 = torch.zeros(tgt_len+size_to_add, batch_size, embed_dim, dtype=x.dtype, \
+                device=x.device)
+            x2[:tgt_len, :batch_size, :] = x
+            x = x2.view(self.kernel_size, -1, embed_dim)
+
+            if not self_attn_padding_mask:
+                self_attn_padding_mask = torch.zeros(batch_size, tgt_len, dtype=torch.uint8, device=x.device)
+            self_attn_padding_mask2 = torch.zeros(batch_size, tgt_len+size_to_add, dtype=encoder_padding_mask.dtype, device=encoder_padding_mask.device)
+            self_attn_padding_mask2.fill_(1)
+            self_attn_padding_mask2[:, :tgt_len] = self_attn_padding_mask
+            self_attn_padding_mask = self_attn_padding_mask2.view(-1, self.kernel_size)
+
+        ############################# END ADDED PART ###################################
+
         residual = x
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, before=True)
         if prev_self_attn_state is not None:
@@ -771,6 +770,14 @@ class TransformerDecoderLayer(nn.Module):
             prev_key, prev_value = prev_self_attn_state
             saved_state = {"prev_key": prev_key, "prev_value": prev_value}
             self.self_attn._set_input_buffer(incremental_state, saved_state)
+
+        ############################# MODIFIED PART ####################################
+
+        current_attn_mask = self_attn_mask
+
+        if self.use_local_decoder:
+            current_attn_mask = self.buffered_future_mask(x) if incremental_state is None else None
+
         x, _ = self.self_attn(
             query=x,
             key=x,
@@ -778,11 +785,21 @@ class TransformerDecoderLayer(nn.Module):
             key_padding_mask=self_attn_padding_mask,
             incremental_state=incremental_state,
             need_weights=False,
-            attn_mask=self_attn_mask,
-        )
+            attn_mask=current_attn_mask,
+            )
+        
+        ############################# END MODIFIED PART ####################################
+
+
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = residual + x
         x = self.maybe_layer_norm(self.self_attn_layer_norm, x, after=True)
+
+        ############################# ADDED PART ####################################
+        if self.use_local_decoder:
+            x2 = x.view(-1, batch_size, self.embed_dim)
+            x = x2[:tgt_len, :, :]
+        ############################# END ADDED PART ####################################
 
         attn = None
         if self.encoder_attn is not None:
@@ -794,6 +811,7 @@ class TransformerDecoderLayer(nn.Module):
                 prev_key, prev_value = prev_attn_state
                 saved_state = {"prev_key": prev_key, "prev_value": prev_value}
                 self.encoder_attn._set_input_buffer(incremental_state, saved_state)
+
             x, attn = self.encoder_attn(
                 query=x,
                 key=encoder_out,
@@ -806,7 +824,7 @@ class TransformerDecoderLayer(nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
             x = residual + x
             x = self.maybe_layer_norm(self.encoder_attn_layer_norm, x, after=True)
-
+        
         residual = x
         x = self.maybe_layer_norm(self.final_layer_norm, x, before=True)
         x = F.relu(self.fc1(x))
@@ -830,6 +848,15 @@ class TransformerDecoderLayer(nn.Module):
 
     def make_generation_fast_(self, need_attn=False, **kwargs):
         self.need_attn = need_attn
+
+    #Normally not here, only in LocalTransformerDecoder
+    def buffered_future_mask(self, tensor):
+        dim = tensor.size(0)
+        if not hasattr(self, '_future_mask') or self._future_mask is None or self._future_mask.device != tensor.device:
+            self._future_mask = torch.triu(utils.fill_with_neg_inf(tensor.new(dim, dim)), 1)
+        if self._future_mask.size(0) < dim:
+            self._future_mask = torch.triu(utils.fill_with_neg_inf(self._future_mask.resize_(dim, dim)), 1)
+        return self._future_mask[:dim, :dim]
 
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):
@@ -862,7 +889,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
     return m
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm')
+@register_model_architecture('localtransformer_lm', 'localtransformer_lm')
 def base_lm_architecture(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
@@ -889,7 +916,7 @@ def base_lm_architecture(args):
     args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', False)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_big')
+@register_model_architecture('localtransformer_lm', 'localtransformer_lm_big')
 def transformer_lm_big(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
@@ -897,13 +924,13 @@ def transformer_lm_big(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_wiki103')
+@register_model_architecture('localtransformer_lm', 'localtransformer_lm_wiki103')
 def transformer_lm_wiki103(args):
     args.dropout = getattr(args, 'dropout', 0.3)
     transformer_lm_big(args)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_gbw')
+@register_model_architecture('localtransformer_lm', 'localtransformer_lm_gbw')
 def transformer_lm_gbw(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.dropout = getattr(args, 'dropout', 0.1)
@@ -911,14 +938,7 @@ def transformer_lm_gbw(args):
     transformer_lm_big(args)
 
 
-@register_model_architecture('transformer', 'local_transformer')
-def local_transformer_architecture(args):
-    args.local_transformer = True
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    transformer_small(args)
-
-
-@register_model_architecture('transformer', 'transformer_2')
+@register_model_architecture('localtransformer', 'localtransformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -946,13 +966,8 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
-    args.propagation = getattr(args, "propagation", False)
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    args.local_transformer = getattr(args, "local_transformer", False)
 
-
-
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
+@register_model_architecture('localtransformer', 'localtransformer_iwslt_de_en')
 def transformer_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -965,13 +980,13 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
+@register_model_architecture('localtransformer', 'localtransformer_wmt_en_de')
 def transformer_wmt_en_de(args):
     base_architecture(args)
 
 
 # parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-@register_model_architecture('transformer', 'transformer_vaswani_wmt_en_de_big')
+@register_model_architecture('localtransformer', 'localtransformer_vaswani_wmt_en_de_big')
 def transformer_vaswani_wmt_en_de_big(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
@@ -984,20 +999,20 @@ def transformer_vaswani_wmt_en_de_big(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_vaswani_wmt_en_fr_big')
+@register_model_architecture('localtransformer', 'localtransformer_vaswani_wmt_en_fr_big')
 def transformer_vaswani_wmt_en_fr_big(args):
     args.dropout = getattr(args, 'dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de_big')
+@register_model_architecture('localtransformer', 'localtransformer_wmt_en_de_big')
 def transformer_wmt_en_de_big(args):
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
 
 
 # default parameters used in tensor2tensor implementation
-@register_model_architecture('transformer', 'transformer_wmt_en_de_big_t2t')
+@register_model_architecture('localtransformer', 'localtransformer_wmt_en_de_big_t2t')
 def transformer_wmt_en_de_big_t2t(args):
     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
@@ -1005,9 +1020,9 @@ def transformer_wmt_en_de_big_t2t(args):
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
 
-@register_model_architecture('transformer', 'transformer')
-@register_model_architecture('transformer', 'transformer_small')
-def transformer_small(args):
+
+@register_model_architecture('localtransformer', 'localtransformer_small')
+def localtransformer_small(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -1033,7 +1048,3 @@ def transformer_small(args):
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
-    
-    args.propagation = getattr(args, "propagation", False)
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    args.local_transformer = getattr(args, "local_transformer", False)
