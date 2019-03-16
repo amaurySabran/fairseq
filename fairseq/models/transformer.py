@@ -99,6 +99,9 @@ class TransformerModel(FairseqModel):
         parser.add_argument("--local-transformer", action="store_true", default=False,
                             help="use the local transformer from CS224n Project")
         parser.add_argument("--kernel-size", type=int, default=40)
+        parser.add_argument("--propagation", action="store_true", default=False,
+                            help="Shift the kernels so that information uses the several layers \
+                            to propagate between the kernels")
 
         # fmt: on
 
@@ -301,6 +304,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.local_transformer = args.local_transformer
         self.kernel_size = args.kernel_size
+        self.propagation = args.propagation
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -332,28 +336,19 @@ class TransformerEncoder(FairseqEncoder):
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
 
-
         batch_size, src_len, d = x.size()
-        # print("batch size {}, src_len {}".format(batch_size,src_len))
+        print("batch size {}, src len {}, d {}".format(batch_size, src_len, d))
 
         # if we want to apply kernel size AFTER positional embeddings
         if self.local_transformer:
-            batch_size, src_len, d = x.size()
             size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-            # print("size to add", size_to_add)
 
-            # print("batch size {}, src_len {}".format(batch_size,src_len))
-            # print("size tokens", src_tokens.size())
             src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
             src_tokens = src_tokens.view(-1, self.kernel_size)
-            # print("size tokens", src_tokens.size())
 
-            # print("size x", x.size())
             x = F.pad(x, (0, 0, size_to_add, 0))
             x = x.view(-1, self.kernel_size, d)
-            # print("size x", x.size())
         
-        # print("size of x", x.size())
 
         x = F.dropout(x, p=self.dropout, training=self.training)
 
@@ -366,11 +361,36 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for layer in self.layers:
+        for num_layer, layer in enumerate(self.layers):
+
+            if self.local_transformer and self.propagation:
+                if num_layer % 2 == 1:
+                    x = x.view(-1, batch_size, d)
+                    x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)))
+                    x = x.view(self.kernel_size, -1, d)
+
+                    if encoder_padding_mask is None:
+                        encoder_padding_mask = src_tokens.eq(self.padding_idx)
+                        
+                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+                    encoder_padding_mask = F.pad(encoder_padding_mask, 
+                                    (math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)), value = 1)
+                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
+                    
+
             x = layer(x, encoder_padding_mask)
             if encoder_padding_mask is not None:
                 x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
 
+            if self.local_transformer and self.propagation:
+                if num_layer % 2 == 1:
+                    x = x.view(-1, batch_size, d)
+                    x = x[math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2),:,:].contiguous()
+                    x = x.view(self.kernel_size, -1, d)
+
+                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+                    encoder_padding_mask = encoder_padding_mask[:, math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2)].contiguous()
+                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
 
         if self.local_transformer:
 
