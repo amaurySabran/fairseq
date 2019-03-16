@@ -25,17 +25,17 @@ from . import (
 )
 
 
-@register_model('transformer')
-class TransformerModel(FairseqModel):
+@register_model('transformer_conv')
+class TransformerConvModel(FairseqModel):
     """
-    Transformer model from `"Attention Is All You Need" (Vaswani, et al, 2017)
+    TransformerConv model from `"Attention Is All You Need" (Vaswani, et al, 2017)
     <https://arxiv.org/abs/1706.03762>`_.
 
     Args:
-        encoder (TransformerEncoder): the encoder
-        decoder (TransformerDecoder): the decoder
+        encoder (TransformerConvEncoder): the encoder
+        decoder (TransformerConvDecoder): the decoder
 
-    The Transformer model provides the following named architectures and
+    The TransformerConv model provides the following named architectures and
     command-line arguments:
 
     .. argparse::
@@ -96,10 +96,9 @@ class TransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
-        parser.add_argument("--local-transformer", action="store_true", default=False,
-                            help="use the local transformer from CS224n Project")
-        parser.add_argument("--kernel-size", type=int, default=40)
 
+        parser.add_argument('--kernel-size', type=int, default = 4)
+        parser.add_argument('--deconv', default=False, action='store_true',)
         # fmt: on
 
     @classmethod
@@ -148,13 +147,13 @@ class TransformerModel(FairseqModel):
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
 
-        encoder = TransformerEncoder(args, src_dict, encoder_embed_tokens)
-        decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return TransformerModel(encoder, decoder)
+        encoder = TransformerConvEncoder(args, src_dict, encoder_embed_tokens)
+        decoder = TransformerConvDecoder(args, tgt_dict, decoder_embed_tokens)
+        return TransformerConvModel(encoder, decoder)
 
 
-@register_model('transformer_lm')
-class TransformerLanguageModel(FairseqLanguageModel):
+@register_model('transformer_conv_lm')
+class TransformerConvLanguageModel(FairseqLanguageModel):
     def __init__(self, decoder):
         super().__init__(decoder)
 
@@ -254,16 +253,16 @@ class TransformerLanguageModel(FairseqLanguageModel):
                 args.adaptive_softmax_cutoff, args.adaptive_input_cutoff)
             assert args.decoder_input_dim == args.decoder_output_dim
 
-        decoder = TransformerDecoder(
+        decoder = TransformerConvDecoder(
             args, task.output_dictionary, embed_tokens, no_encoder_attn=True, final_norm=False,
         )
-        return TransformerLanguageModel(decoder)
+        return TransformerConvLanguageModel(decoder)
 
 
-class TransformerEncoder(FairseqEncoder):
+class TransformerConvEncoder(FairseqEncoder):
     """
-    Transformer encoder consisting of *args.encoder_layers* layers. Each layer
-    is a :class:`TransformerEncoderLayer`.
+    TransformerConv encoder consisting of *args.encoder_layers* layers. Each layer
+    is a :class:`TransformerConvEncoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -291,7 +290,7 @@ class TransformerEncoder(FairseqEncoder):
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerEncoderLayer(args)
+            TransformerConvEncoderLayer(args)
             for i in range(args.encoder_layers)
         ])
         self.register_buffer('version', torch.Tensor([2]))
@@ -299,8 +298,12 @@ class TransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
-        self.local_transformer = args.local_transformer
+        self.conv_layer = nn.Conv1d(embed_dim, embed_dim, args.kernel_size, stride = args.kernel_size)
         self.kernel_size = args.kernel_size
+        self.deconv = args.deconv
+
+        if self.deconv:
+            self.deconv_layer = nn.ConvTranspose1d(embed_dim, embed_dim, args.kernel_size, stride=args.kernel_size)
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -317,72 +320,71 @@ class TransformerEncoder(FairseqEncoder):
                 - **encoder_padding_mask** (ByteTensor): the positions of
                   padding elements of shape `(batch, src_len)`
         """
-        # embed tokens and positions
 
-        # if we want to apply kernel size BEFORE positional embeddings
-        # if self.local_transformer:
-        #     batch_size, src_len = src_tokens.size()
-
-        #     size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-        #     src_tokens = F.pad(src_tokens, (size_to_add, 0, 0, 0), value=self.dictionary.pad())
-
-        #     src_tokens = src_tokens.view(-1, self.kernel_size)
-            
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
 
-
-        batch_size, src_len, d = x.size()
-        # print("batch size {}, src_len {}".format(batch_size,src_len))
-
-        # if we want to apply kernel size AFTER positional embeddings
-        if self.local_transformer:
-            batch_size, src_len, d = x.size()
-            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-            # print("size to add", size_to_add)
-
-            # print("batch size {}, src_len {}".format(batch_size,src_len))
-            # print("size tokens", src_tokens.size())
-            src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
-            src_tokens = src_tokens.view(-1, self.kernel_size)
-            # print("size tokens", src_tokens.size())
-
-            # print("size x", x.size())
-            x = F.pad(x, (0, 0, size_to_add, 0))
-            x = x.view(-1, self.kernel_size, d)
-            # print("size x", x.size())
-        
-        # print("size of x", x.size())
-
         x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # B x T x C -> T x B x C
+        #padding
+        batch_size, src_len, d = x.size()
+        size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+        src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
+        x = F.pad(x, (0, 0, size_to_add, 0))
+
+        # B x T x C -> B x C x T
+        x = x.transpose(1, 2)
+
+        x = self.conv_layer(x)
+
+        # B x C x T -> B x T x C -> T x B x C
+        x = x.transpose(1, 2)
         x = x.transpose(0, 1)
 
         # compute padding mask
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
+
+        if self.deconv:
+            encoder_padding_mask_ini = encoder_padding_mask.clone()
+
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
+        else:
+            # reshape the padding_mask
+            # put a 1 in i if the 'kernel_size' elements that are merged to position i
+            # by conv layer are all 1 
+            encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size)
+            encoder_padding_mask = encoder_padding_mask.all(1)
+            encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
 
         # encoder layers
         for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-            if encoder_padding_mask is not None:
-                x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans
-
-
-        if self.local_transformer:
-
-            x = x.view(size_to_add+src_len, batch_size, -1)
-            x = x[size_to_add:, :, :]
-            if encoder_padding_mask is not None:
-                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
 
         if self.normalize:
             x = self.layer_norm(x)
 
+        if self.deconv:
+
+            # T x B x C -> B x T x C -> B x C x T 
+            x = x.transpose(0, 1)
+            x = x.transpose(1, 2)
+            x = self.deconv_layer(x)
+
+            # B x C x T -> B x T x C -> T x B x C
+            x = x.transpose(1, 2)
+            x = x.transpose(0, 1)
+            
+            #removing the parts that corresponded to the pad
+            x = x[size_to_add:, :, :]
+            src_tokens = src_tokens[:, size_to_add:]
+            encoder_padding_mask_ini = encoder_padding_mask_ini[:, size_to_add:]
+
+            return {
+            'encoder_out': x,  # T x B x C
+            'encoder_padding_mask': encoder_padding_mask_ini,  # B x T
+            }
 
         return {
             'encoder_out': x,  # T x B x C
@@ -430,10 +432,10 @@ class TransformerEncoder(FairseqEncoder):
         return state_dict
 
 
-class TransformerDecoder(FairseqIncrementalDecoder):
+class TransformerConvDecoder(FairseqIncrementalDecoder):
     """
-    Transformer decoder consisting of *args.decoder_layers* layers. Each layer
-    is a :class:`TransformerDecoderLayer`.
+    TransformerConv decoder consisting of *args.decoder_layers* layers. Each layer
+    is a :class:`TransformerConvDecoderLayer`.
 
     Args:
         args (argparse.Namespace): parsed command-line arguments
@@ -472,7 +474,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.layers = nn.ModuleList([])
         self.layers.extend([
-            TransformerDecoderLayer(args, no_encoder_attn)
+            TransformerConvDecoderLayer(args, no_encoder_attn)
             for _ in range(args.decoder_layers)
         ])
 
@@ -616,7 +618,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
-class TransformerEncoderLayer(nn.Module):
+class TransformerConvEncoderLayer(nn.Module):
     """Encoder layer block.
 
     In the original paper each operation (multi-head attention or FFN) is
@@ -680,7 +682,7 @@ class TransformerEncoderLayer(nn.Module):
             return x
 
 
-class TransformerDecoderLayer(nn.Module):
+class TransformerConvDecoderLayer(nn.Module):
     """Decoder layer block.
 
     In the original paper each operation (multi-head attention, encoder
@@ -842,7 +844,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
     return m
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm')
+@register_model_architecture('transformer_conv_lm', 'transformer_conv_lm')
 def base_lm_architecture(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
@@ -869,36 +871,30 @@ def base_lm_architecture(args):
     args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', False)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_big')
-def transformer_lm_big(args):
+@register_model_architecture('transformer_conv_lm', 'transformer_conv_lm_big')
+def transformer_conv_lm_big(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
     base_lm_architecture(args)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_wiki103')
-def transformer_lm_wiki103(args):
+@register_model_architecture('transformer_conv_lm', 'transformer_conv_lm_wiki103')
+def transformer_conv_lm_wiki103(args):
     args.dropout = getattr(args, 'dropout', 0.3)
-    transformer_lm_big(args)
+    transformer_conv_lm_big(args)
 
 
-@register_model_architecture('transformer_lm', 'transformer_lm_gbw')
-def transformer_lm_gbw(args):
+@register_model_architecture('transformer_conv_lm', 'transformer_conv_lm_gbw')
+def transformer_conv_lm_gbw(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.dropout = getattr(args, 'dropout', 0.1)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    transformer_lm_big(args)
+    transformer_conv_lm_big(args)
 
 
-@register_model_architecture('transformer', 'local_transformer')
-def local_transformer_architecture(args):
-    args.local_transformer = True
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    transformer_small(args)
 
-
-@register_model_architecture('transformer', 'transformer_2')
+@register_model_architecture('transformer_conv', 'transformer_conv_2')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -927,8 +923,8 @@ def base_architecture(args):
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
 
-@register_model_architecture('transformer', 'transformer_iwslt_de_en')
-def transformer_iwslt_de_en(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_iwslt_de_en')
+def transformer_conv_iwslt_de_en(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
@@ -940,14 +936,14 @@ def transformer_iwslt_de_en(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de')
-def transformer_wmt_en_de(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_wmt_en_de')
+def transformer_conv_wmt_en_de(args):
     base_architecture(args)
 
 
 # parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-@register_model_architecture('transformer', 'transformer_vaswani_wmt_en_de_big')
-def transformer_vaswani_wmt_en_de_big(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_vaswani_wmt_en_de_big')
+def transformer_conv_vaswani_wmt_en_de_big(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
     args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
@@ -959,30 +955,30 @@ def transformer_vaswani_wmt_en_de_big(args):
     base_architecture(args)
 
 
-@register_model_architecture('transformer', 'transformer_vaswani_wmt_en_fr_big')
-def transformer_vaswani_wmt_en_fr_big(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_vaswani_wmt_en_fr_big')
+def transformer_conv_vaswani_wmt_en_fr_big(args):
     args.dropout = getattr(args, 'dropout', 0.1)
-    transformer_vaswani_wmt_en_de_big(args)
+    transformer_conv_vaswani_wmt_en_de_big(args)
 
 
-@register_model_architecture('transformer', 'transformer_wmt_en_de_big')
-def transformer_wmt_en_de_big(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_wmt_en_de_big')
+def transformer_conv_wmt_en_de_big(args):
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    transformer_vaswani_wmt_en_de_big(args)
+    transformer_conv_vaswani_wmt_en_de_big(args)
 
 
 # default parameters used in tensor2tensor implementation
-@register_model_architecture('transformer', 'transformer_wmt_en_de_big_t2t')
-def transformer_wmt_en_de_big_t2t(args):
+@register_model_architecture('transformer_conv', 'transformer_conv_wmt_en_de_big_t2t')
+def transformer_conv_wmt_en_de_big_t2t(args):
     args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
     args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    transformer_vaswani_wmt_en_de_big(args)
+    transformer_conv_vaswani_wmt_en_de_big(args)
 
-@register_model_architecture('transformer', 'transformer')
-@register_model_architecture('transformer', 'transformer_small')
-def transformer_small(args):
+@register_model_architecture('transformer_conv', 'transformer_conv')
+@register_model_architecture('transformer_conv', 'transformer_conv_small')
+def transformer_conv_small(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
@@ -1004,6 +1000,7 @@ def transformer_small(args):
     args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
     args.share_decoder_input_output_embed = getattr(args, 'share_decoder_input_output_embed', False)
     args.share_all_embeddings = getattr(args, 'share_all_embeddings', False)
+    args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
     args.no_token_positional_embeddings = getattr(args, 'no_token_positional_embeddings', False)
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
