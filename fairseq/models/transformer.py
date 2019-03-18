@@ -96,13 +96,6 @@ class TransformerModel(FairseqModel):
                                  'Must be used with adaptive_loss criterion'),
         parser.add_argument('--adaptive-softmax-dropout', type=float, metavar='D',
                             help='sets adaptive softmax dropout for the tail projections')
-        parser.add_argument("--local-transformer", action="store_true", default=False,
-                            help="use the local transformer from CS224n Project")
-        parser.add_argument("--kernel-size", type=int, default=40)
-        parser.add_argument("--propagation", action="store_true", default=False,
-                            help="Shift the kernels so that information uses the several layers \
-                            to propagate between the kernels")
-
         # fmt: on
 
     @classmethod
@@ -302,10 +295,6 @@ class TransformerEncoder(FairseqEncoder):
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
 
-        self.local_transformer = args.local_transformer
-        self.kernel_size = args.kernel_size
-        self.propagation = args.propagation
-
     def forward(self, src_tokens, src_lengths):
         """
         Args:
@@ -322,24 +311,9 @@ class TransformerEncoder(FairseqEncoder):
                   padding elements of shape `(batch, src_len)`
         """
         # embed tokens and positions
-
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
-
-        batch_size, src_len, d = x.size()
-        # print("batch size {}, src len {}, d {}".format(batch_size, src_len, d))
-
-        # if we want to apply kernel size AFTER positional embeddings
-        if self.local_transformer:
-            size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-
-            src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
-            src_tokens = src_tokens.view(-1, self.kernel_size)
-
-            x = F.pad(x, (0, 0, size_to_add, 0))
-            x = x.view(-1, self.kernel_size, d)
-
         x = F.dropout(x, p=self.dropout, training=self.training)
 
         # B x T x C -> T x B x C
@@ -351,48 +325,11 @@ class TransformerEncoder(FairseqEncoder):
             encoder_padding_mask = None
 
         # encoder layers
-        for num_layer, layer in enumerate(self.layers):
-
-            if self.local_transformer and self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)))
-                    x = x.view(self.kernel_size, -1, d)
-
-                    if encoder_padding_mask is None:
-                        encoder_padding_mask = src_tokens.eq(self.padding_idx)
-                        
-                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                    encoder_padding_mask = F.pad(encoder_padding_mask, 
-                                    (math.ceil(self.kernel_size/2), math.floor(self.kernel_size/2)), value = 1)
-                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
-                    
-
+        for layer in self.layers:
             x = layer(x, encoder_padding_mask)
-        if encoder_padding_mask is not None:
-            x[encoder_padding_mask.transpose(0,1)]=0.0 # mask nans, useful for batches with only pad indices
-
-            if self.local_transformer and self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = x[math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2),:,:].contiguous()
-                    x = x.view(self.kernel_size, -1, d)
-
-                    encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                    encoder_padding_mask = encoder_padding_mask[:, math.ceil(self.kernel_size/2):-math.floor(self.kernel_size/2)].contiguous()
-                    encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size) 
-
-        if self.local_transformer:
-
-            x = x.view(size_to_add+src_len, batch_size, -1)
-            x = x[size_to_add:, :, :]
-            if encoder_padding_mask is not None:
-                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                encoder_padding_mask = encoder_padding_mask[:, size_to_add:]
 
         if self.normalize:
             x = self.layer_norm(x)
-
 
         return {
             'encoder_out': x,  # T x B x C
@@ -901,14 +838,7 @@ def transformer_lm_gbw(args):
     transformer_lm_big(args)
 
 
-@register_model_architecture('transformer', 'local_transformer')
-def local_transformer_architecture(args):
-    args.local_transformer = True
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    transformer_small(args)
-
-
-@register_model_architecture('transformer', 'transformer_2')
+@register_model_architecture('transformer', 'transformer')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -935,11 +865,6 @@ def base_architecture(args):
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
-
-    args.propagation = getattr(args, "propagation", False)
-    args.kernel_size = getattr(args, 'kernel_size', 40)
-    args.local_transformer = getattr(args, "local_transformer", False)
-
 
 
 @register_model_architecture('transformer', 'transformer_iwslt_de_en')
@@ -995,7 +920,6 @@ def transformer_wmt_en_de_big_t2t(args):
     args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
     transformer_vaswani_wmt_en_de_big(args)
 
-@register_model_architecture('transformer', 'transformer')
 @register_model_architecture('transformer', 'transformer_small')
 def transformer_small(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
@@ -1023,7 +947,7 @@ def transformer_small(args):
 
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
-    
+
     args.propagation = getattr(args, "propagation", False)
     args.kernel_size = getattr(args, 'kernel_size', 40)
     args.local_transformer = getattr(args, "local_transformer", False)

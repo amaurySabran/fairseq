@@ -10,11 +10,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from fairseq.models.transformer import TransformerModel, TransformerEncoderLayer, TransformerDecoder, Embedding, \
+    LayerNorm, PositionalEmbedding, Linear
 
 from fairseq import options
 from fairseq import utils
-from fairseq.models.transformer import TransformerModel, TransformerEncoderLayer, TransformerDecoder, Embedding, \
-    LayerNorm, PositionalEmbedding, Linear
 
 from fairseq.modules import (
     AdaptiveInput, AdaptiveSoftmax, CharacterTokenEmbedder, LearnedPositionalEmbedding, MultiheadAttention,
@@ -27,23 +27,24 @@ from . import (
 )
 
 
-@register_model('transformer_conv')
-class TransformerConvModel(TransformerModel):
+@register_model('transformer_local')
+class TransformerLocalModel(TransformerModel):
     """
-    A transformer model where a stridedconvolution is applied on the input sequence to reduce the
-     input sequence size
+    A Transformer model where sentence is cut into small parts that are processed independently
     """
 
     def __init__(self, encoder, decoder):
-        super(TransformerConvModel, self).__init__(encoder, decoder)
+        super(TransformerLocalModel, self).__init__(encoder, decoder)
 
     @staticmethod
     def add_args(parser):
         """Add model-specific arguments to the parser."""
-        super(TransformerConvModel,TransformerConvModel).add_args(parser)
-        parser.add_argument('--kernel-size', type=int, default=4)
-        parser.add_argument('--deconv', default=False, action='store_true')
-        # fmt: on
+        # fmt: off
+        super(TransformerLocalModel,TransformerLocalModel).add_args(parser)
+        parser.add_argument("--kernel-size", type=int, default=40)
+        parser.add_argument("--propagation", action="store_true", default=False,
+                            help="Shift the kernels so that information uses the several layers \
+                            to propagate between the kernels")
 
     @classmethod
     def build_model(cls, args, task):
@@ -91,14 +92,14 @@ class TransformerConvModel(TransformerModel):
                 tgt_dict, args.decoder_embed_dim, args.decoder_embed_path
             )
 
-        encoder = TransformerConvEncoder(args, src_dict, encoder_embed_tokens)
+        encoder = LocalTransformerEncoder(args, src_dict, encoder_embed_tokens)
         decoder = TransformerDecoder(args, tgt_dict, decoder_embed_tokens)
-        return TransformerConvModel(encoder, decoder)
+        return TransformerLocalModel(encoder, decoder)
 
 
-class TransformerConvEncoder(FairseqEncoder):
+class LocalTransformerEncoder(FairseqEncoder):
     """
-    TransformerConv encoder consisting of *args.encoder_layers* layers. Each layer
+    Transformer encoder consisting of *args.encoder_layers* layers. Each layer
     is a :class:`TransformerEncoderLayer`.
 
     Args:
@@ -134,13 +135,8 @@ class TransformerConvEncoder(FairseqEncoder):
         self.normalize = args.encoder_normalize_before
         if self.normalize:
             self.layer_norm = LayerNorm(embed_dim)
-
-        self.conv_layer = nn.Conv1d(embed_dim, embed_dim, args.kernel_size, stride=args.kernel_size)
         self.kernel_size = args.kernel_size
-        self.deconv = args.deconv
-
-        if self.deconv:
-            self.deconv_layer = nn.ConvTranspose1d(embed_dim, embed_dim, args.kernel_size, stride=args.kernel_size)
+        self.propagation = args.propagation
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -157,70 +153,50 @@ class TransformerConvEncoder(FairseqEncoder):
                 - **encoder_padding_mask** (ByteTensor): the positions of
                   padding elements of shape `(batch, src_len)`
         """
+        # embed tokens and positions
 
         x = self.embed_scale * self.embed_tokens(src_tokens)
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
 
+        batch_size, src_len, d = x.size()
+
+        size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+        #
+        x = F.pad(x, (0, 0, size_to_add, 0))
+        x = x.view(-1, self.kernel_size, d)
         x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # padding
-        batch_size, src_len, d = x.size()
-        size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-        src_tokens = F.pad(src_tokens, (size_to_add, 0), value=self.padding_idx)
-        x = F.pad(x, (0, 0, size_to_add, 0))
-
-        # B x T x C -> B x C x T
-        x = x.transpose(1, 2)
-
-        x = self.conv_layer(x)
-
-        # B x C x T -> B x T x C -> T x B x C
-        x = x.transpose(1, 2)
+        # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        # compute padding mask
+
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
-
-        if self.deconv:
-            encoder_padding_mask_ini = encoder_padding_mask.clone()
-
         if not encoder_padding_mask.any():
             encoder_padding_mask = None
-        else:
-            # reshape the padding_mask
-            # put a 1 in i if the 'kernel_size' elements that are merged to position i
-            # by conv layer are all 1 
-            encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size)
-            encoder_padding_mask = encoder_padding_mask.all(1)
-            encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
 
         # encoder layers
-        for layer in self.layers:
-            x = layer(x, encoder_padding_mask)
+        for num_layer, layer in enumerate(self.layers):
 
+            if self.propagation:
+                if num_layer % 2 == 1:
+                    x = x.view(-1, batch_size, d)
+                    x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size / 2), math.floor(self.kernel_size / 2)))
+                    x = x.view(self.kernel_size, -1, d)
+            # Using local transformer and padding masks leads to bug
+            # for now we will remove the mask and let the model learn that padding tokens are useless
+            x = layer(x, None)
+
+            if self.propagation:
+                if num_layer % 2 == 1:
+                    x = x.view(-1, batch_size, d)
+                    x = x[math.ceil(self.kernel_size / 2):-math.floor(self.kernel_size / 2), :, :].contiguous()
+                    x = x.view(self.kernel_size, -1, d)
+
+        x = x.view(size_to_add + src_len, batch_size, -1)
+        x = x[size_to_add:, :, :]
         if self.normalize:
             x = self.layer_norm(x)
-
-        if self.deconv:
-            # T x B x C -> B x T x C -> B x C x T
-            x = x.transpose(0, 1)
-            x = x.transpose(1, 2)
-            x = self.deconv_layer(x)
-
-            # B x C x T -> B x T x C -> T x B x C
-            x = x.transpose(1, 2)
-            x = x.transpose(0, 1)
-
-            # removing the parts that corresponded to the pad
-            x = x[size_to_add:, :, :]
-            encoder_padding_mask_ini = encoder_padding_mask_ini[:, size_to_add:]
-
-            return {
-                'encoder_out': x,  # T x B x C
-                'encoder_padding_mask': encoder_padding_mask_ini,  # B x T
-            }
-
         return {
             'encoder_out': x,  # T x B x C
             'encoder_padding_mask': encoder_padding_mask,  # B x T
@@ -267,8 +243,7 @@ class TransformerConvEncoder(FairseqEncoder):
         return state_dict
 
 
-
-@register_model_architecture('transformer_conv', 'transformer_conv')
+@register_model_architecture('transformer_local', 'transformer_local')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -296,12 +271,12 @@ def base_architecture(args):
     args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
     args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
 
-    args.kernel_size = getattr(args, 'kernel_size', 4)
-    args.deconv = getattr(args, 'deconv', False)
+    args.propagation = getattr(args, "propagation", False)
+    args.kernel_size = getattr(args, 'kernel_size', 100)
 
 
-@register_model_architecture('transformer_conv', 'transformer_conv_small')
-def transformer_conv_small(args):
+@register_model_architecture('transformer_local', 'transformer_local_small')
+def transformer_local_small(args):
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 256)
     args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
     args.encoder_layers = getattr(args, 'encoder_layers', 3)
