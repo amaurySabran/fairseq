@@ -23,6 +23,7 @@ from .multihead_attention import MultiheadAttention
 from .scalar_bias import ScalarBias
 from .sinusoidal_positional_embedding import SinusoidalPositionalEmbedding
 from .unfold1d import unfold1d
+from .multihead_conv_attention import MultiheadConvAttention
 
 __all__ = [
     'AdaptiveInput',
@@ -40,6 +41,7 @@ __all__ = [
     'LogSumExpMoE',
     'MeanPoolGatingNetwork',
     'MultiheadAttention',
+    'MultiheadConvAttention',
     'ScalarBias',
     'SinusoidalPositionalEmbedding',
     'unfold1d',
