@@ -121,6 +121,12 @@ class MultiheadConvAttention(nn.Module):
         v = v.transpose(0, 1)
         v = v.transpose(1, 2)
 
+        batch_size, d, src_len = k.size()
+        size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
+        
+        k = F.pad(k, (size_to_add, 0))
+        v = F.pad(v, (size_to_add, 0))
+
         k = self.conv_layer_K(k)
         v = self.conv_layer_V(v) 
 
@@ -177,9 +183,10 @@ class MultiheadConvAttention(nn.Module):
 
         ######################################### MODIF HERE ##############################################
 
-            #reshape key_padding_mask
-            #put 1 iff all the elements that are merged in the convolution step were 1
-            key_padding_mask = key_padding_mask[:, :src_len - src_len % self.kernel_size].contiguous()
+            # #reshape key_padding_mask
+            # #put 1 iff all the elements that are merged in the convolution step were 1
+            key_padding_mask = F.pad(key_padding_mask, (size_to_add, 0), value=1)
+            # key_padding_mask = key_padding_mask[:, :src_len - src_len % self.kernel_size].contiguous()
             key_padding_mask = key_padding_mask.view(-1, self.kernel_size)
             key_padding_mask = key_padding_mask.all(1)
             key_padding_mask = key_padding_mask.view(bsz, -1)

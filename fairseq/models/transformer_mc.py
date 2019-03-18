@@ -590,10 +590,6 @@ class TransformerMCEncoderLayer(nn.Module):
             self.embed_dim, args.encoder_attention_heads,
             dropout=args.attention_dropout, kernel_size = args.kernel_size
         )
-        # self.self_attn = MultiheadAttention(
-        #     self.embed_dim, args.encoder_attention_heads,
-        #     dropout=args.attention_dropout
-        # )
         self.dropout = args.dropout
         self.relu_dropout = args.relu_dropout
         self.normalize_before = args.encoder_normalize_before
@@ -797,58 +793,7 @@ def PositionalEmbedding(num_embeddings, embedding_dim, padding_idx, left_pad, le
         m = SinusoidalPositionalEmbedding(embedding_dim, padding_idx, left_pad, num_embeddings + padding_idx + 1)
     return m
 
-
-@register_model_architecture('transformer_mc_lm', 'transformer_mc_lm')
-def base_lm_architecture(args):
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 2048)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
-    args.adaptive_softmax_cutoff = getattr(args, 'adaptive_softmax_cutoff', None)
-    args.adaptive_softmax_dropout = getattr(args, 'adaptive_softmax_dropout', 0)
-    args.adaptive_softmax_factor = getattr(args, 'adaptive_softmax_factor', 4)
-    args.decoder_learned_pos = getattr(args, 'decoder_learned_pos', False)
-
-    args.character_embeddings = getattr(args, 'character_embeddings', False)
-
-    args.decoder_output_dim = getattr(args, 'decoder_output_dim', args.decoder_embed_dim)
-    args.decoder_input_dim = getattr(args, 'decoder_input_dim', args.decoder_embed_dim)
-
-    # The model training is not stable without this
-    args.decoder_normalize_before = True
-
-    args.adaptive_input = getattr(args, 'adaptive_input', False)
-    args.adaptive_input_factor = getattr(args, 'adaptive_input_factor', 4)
-    args.adaptive_input_cutoff = getattr(args, 'adaptive_input_cutoff', None)
-
-    args.tie_adaptive_weights = getattr(args, 'tie_adaptive_weights', False)
-    args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', False)
-
-
-@register_model_architecture('transformer_mc_lm', 'transformer_mc_lm_big')
-def transformer_mc_lm_big(args):
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
-    base_lm_architecture(args)
-
-
-@register_model_architecture('transformer_mc_lm', 'transformer_mc_lm_wiki103')
-def transformer_mc_lm_wiki103(args):
-    args.dropout = getattr(args, 'dropout', 0.3)
-    transformer_mc_lm_big(args)
-
-
-@register_model_architecture('transformer_mc_lm', 'transformer_mc_lm_gbw')
-def transformer_mc_lm_gbw(args):
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.dropout = getattr(args, 'dropout', 0.1)
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    transformer_mc_lm_big(args)
-
-
-
-@register_model_architecture('transformer_mc', 'transformer_mc_2')
+@register_model_architecture('transformer_mc', 'transformer_mc')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -878,62 +823,6 @@ def base_architecture(args):
 
     args.kernel_size = getattr(args, 'kernel_size', 4)
 
-
-
-@register_model_architecture('transformer_mc', 'transformer_mc_iwslt_de_en')
-def transformer_mc_iwslt_de_en(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 1024)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 4)
-    args.encoder_layers = getattr(args, 'encoder_layers', 6)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 1024)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 4)
-    args.decoder_layers = getattr(args, 'decoder_layers', 6)
-    base_architecture(args)
-
-
-@register_model_architecture('transformer_mc', 'transformer_mc_wmt_en_de')
-def transformer_mc_wmt_en_de(args):
-    base_architecture(args)
-
-
-# parameters used in the "Attention Is All You Need" paper (Vaswani, et al, 2017)
-@register_model_architecture('transformer_mc', 'transformer_mc_vaswani_wmt_en_de_big')
-def transformer_mc_vaswani_wmt_en_de_big(args):
-    args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 1024)
-    args.encoder_ffn_embed_dim = getattr(args, 'encoder_ffn_embed_dim', 4096)
-    args.encoder_attention_heads = getattr(args, 'encoder_attention_heads', 16)
-    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', False)
-    args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
-    args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
-    args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 16)
-    args.dropout = getattr(args, 'dropout', 0.3)
-    base_architecture(args)
-
-
-@register_model_architecture('transformer_mc', 'transformer_mc_vaswani_wmt_en_fr_big')
-def transformer_mc_vaswani_wmt_en_fr_big(args):
-    args.dropout = getattr(args, 'dropout', 0.1)
-    transformer_mc_vaswani_wmt_en_de_big(args)
-
-
-@register_model_architecture('transformer_mc', 'transformer_mc_wmt_en_de_big')
-def transformer_mc_wmt_en_de_big(args):
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    transformer_mc_vaswani_wmt_en_de_big(args)
-
-
-# default parameters used in tensor2tensor implementation
-@register_model_architecture('transformer_mc', 'transformer_mc_wmt_en_de_big_t2t')
-def transformer_mc_wmt_en_de_big_t2t(args):
-    args.encoder_normalize_before = getattr(args, 'encoder_normalize_before', True)
-    args.decoder_normalize_before = getattr(args, 'decoder_normalize_before', True)
-    args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
-    args.relu_dropout = getattr(args, 'relu_dropout', 0.1)
-    transformer_mc_vaswani_wmt_en_de_big(args)
-
-@register_model_architecture('transformer_mc', 'transformer_mc')
 @register_model_architecture('transformer_mc', 'transformer_mc_small')
 def transformer_mc_small(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
