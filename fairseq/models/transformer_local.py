@@ -45,7 +45,6 @@ class TransformerLocalModel(TransformerModel):
         parser.add_argument("--propagation", action="store_true", default=False,
                             help="Shift the kernels so that information uses the several layers \
                             to propagate between the kernels")
-        parser.add_argument("--cut", action="store_true", default=False, help='cut sentences instead of padding them')
 
     @classmethod
     def build_model(cls, args, task):
@@ -138,7 +137,6 @@ class LocalTransformerEncoder(FairseqEncoder):
             self.layer_norm = LayerNorm(embed_dim)
         self.kernel_size = args.kernel_size
         self.propagation = args.propagation
-        self.cut = args.cut
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -165,16 +163,10 @@ class LocalTransformerEncoder(FairseqEncoder):
         batch_size, src_len, d = x.size()
         size_to_remove = src_len % self.kernel_size
         size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-        # cut to fit kernel size
-        if self.cut:
-            x = x[:, :src_len - size_to_remove, :]
-            src_tokens = src_tokens[:, :src_len - size_to_remove]
-            x = x.contiguous().view(-1, self.kernel_size, d)
 
-        else:
-            x = F.pad(x,(0,0,size_to_add,0,0,0))
-            src_tokens = F.pad(src_tokens,(size_to_add,0),value=self.dictionary.pad())
-            x = x.view(-1, self.kernel_size, d)
+        x = F.pad(x,(0,0,size_to_add,0,0,0))
+        src_tokens = F.pad(src_tokens,(size_to_add,0),value=self.dictionary.pad())
+        x = x.view(-1, self.kernel_size, d)
 
         if (x!=x).any():
             import pdb;
@@ -212,16 +204,12 @@ class LocalTransformerEncoder(FairseqEncoder):
             #         x = x.view(self.kernel_size, -1, d)
 
         x = x.transpose(1, 0)
-        if self.cut:
-            x = x.contiguous().view(batch_size, src_len - size_to_remove, -1)
-            if encoder_padding_mask is not None:
-                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-        else:
-            x = x.contiguous().view(batch_size, src_len +size_to_add, -1)
-            x = x[:,size_to_add:,:]
-            if encoder_padding_mask is not None:
-                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
-                encoder_padding_mask = encoder_padding_mask[:,size_to_add:]
+
+        x = x.contiguous().view(batch_size, src_len +size_to_add, -1)
+        x = x[:,size_to_add:,:]
+        if encoder_padding_mask is not None:
+            encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+            encoder_padding_mask = encoder_padding_mask[:,size_to_add:]
 
         x = x.transpose(0, 1)
 
