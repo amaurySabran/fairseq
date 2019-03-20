@@ -835,7 +835,7 @@ def lightconv_lm_gbw(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('lightconv', 'lightconv_2')
+@register_model_architecture('lightconv', 'lightconv')
 def base_architecture(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
     args.encoder_embed_dim = getattr(args, 'encoder_embed_dim', 512)
@@ -938,7 +938,6 @@ def lightconv_wmt_zh_en_big(args):
     args.weight_dropout = getattr(args, 'weight_dropout', 0.2)
     lightconv_wmt_en_de_big(args)
 
-@register_model_architecture('lightconv', 'lightconv')
 @register_model_architecture('lightconv', 'lightconv_small')
 def lightconv_small(args):
     args.encoder_embed_path = getattr(args, 'encoder_embed_path', None)
