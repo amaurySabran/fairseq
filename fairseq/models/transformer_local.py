@@ -40,11 +40,12 @@ class TransformerLocalModel(TransformerModel):
     def add_args(parser):
         """Add model-specific arguments to the parser."""
         # fmt: off
-        super(TransformerLocalModel,TransformerLocalModel).add_args(parser)
+        super(TransformerLocalModel, TransformerLocalModel).add_args(parser)
         parser.add_argument("--kernel-size", type=int, default=40)
         parser.add_argument("--propagation", action="store_true", default=False,
                             help="Shift the kernels so that information uses the several layers \
                             to propagate between the kernels")
+        parser.add_argument("--cut", action="store_true", default=False, help='cut sentences instead of padding them')
 
     @classmethod
     def build_model(cls, args, task):
@@ -137,6 +138,7 @@ class LocalTransformerEncoder(FairseqEncoder):
             self.layer_norm = LayerNorm(embed_dim)
         self.kernel_size = args.kernel_size
         self.propagation = args.propagation
+        self.cut = args.cut
 
     def forward(self, src_tokens, src_lengths):
         """
@@ -156,45 +158,77 @@ class LocalTransformerEncoder(FairseqEncoder):
         # embed tokens and positions
 
         x = self.embed_scale * self.embed_tokens(src_tokens)
+        # print("src_tokens shape : {}".format(src_tokens.size()))
+        # print("src lengths {}".format(src_lengths))
         if self.embed_positions is not None:
             x += self.embed_positions(src_tokens)
-
         batch_size, src_len, d = x.size()
-
+        size_to_remove = src_len % self.kernel_size
         size_to_add = (self.kernel_size - src_len % self.kernel_size) % self.kernel_size
-        #
-        x = F.pad(x, (0, 0, size_to_add, 0))
-        x = x.view(-1, self.kernel_size, d)
+        # cut to fit kernel size
+        if self.cut:
+            x = x[:, :src_len - size_to_remove, :]
+            src_tokens = src_tokens[:, :src_len - size_to_remove]
+            x = x.contiguous().view(-1, self.kernel_size, d)
+
+        else:
+            x = F.pad(x,(0,0,size_to_add,0,0,0))
+            src_tokens = F.pad(src_tokens,(size_to_add,0),value=self.dictionary.pad())
+            x = x.view(-1, self.kernel_size, d)
+
+        if (x!=x).any():
+            import pdb;
+            pdb.set_trace()
+
         x = F.dropout(x, p=self.dropout, training=self.training)
+
+        encoder_padding_mask = src_tokens.eq(self.padding_idx)
+        encoder_padding_mask = encoder_padding_mask.view(-1, self.kernel_size)
+
+        if not encoder_padding_mask.any():
+            encoder_padding_mask = None
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-
-        encoder_padding_mask = src_tokens.eq(self.padding_idx)
-        if not encoder_padding_mask.any():
-            encoder_padding_mask = None
-
         # encoder layers
         for num_layer, layer in enumerate(self.layers):
-
-            if self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size / 2), math.floor(self.kernel_size / 2)))
-                    x = x.view(self.kernel_size, -1, d)
+            # if self.propagation:
+            #     if num_layer % 2 == 1:
+            #         x = x.view(-1, batch_size, d)
+            #         x = F.pad(x, (0, 0, 0, 0, math.ceil(self.kernel_size / 2), math.floor(self.kernel_size / 2)))
+            #         x = x.view(self.kernel_size, -1, d)
             # Using local transformer and padding masks leads to bug
             # for now we will remove the mask and let the model learn that padding tokens are useless
-            x = layer(x, None)
+            x = layer(x, encoder_padding_mask)
+            if encoder_padding_mask is not None:
+                x = x.masked_fill(encoder_padding_mask.transpose(0,1).unsqueeze(-1),0.0)
 
-            if self.propagation:
-                if num_layer % 2 == 1:
-                    x = x.view(-1, batch_size, d)
-                    x = x[math.ceil(self.kernel_size / 2):-math.floor(self.kernel_size / 2), :, :].contiguous()
-                    x = x.view(self.kernel_size, -1, d)
 
-        x = x.view(size_to_add + src_len, batch_size, -1)
-        x = x[size_to_add:, :, :]
+            # if self.propagation:
+            #     if num_layer % 2 == 1:
+            #         x = x.view(-1, batch_size, d)
+            #         x = x[math.ceil(self.kernel_size / 2):-math.floor(self.kernel_size / 2), :, :].contiguous()
+            #         x = x.view(self.kernel_size, -1, d)
+
+        x = x.transpose(1, 0)
+        if self.cut:
+            x = x.contiguous().view(batch_size, src_len - size_to_remove, -1)
+            if encoder_padding_mask is not None:
+                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+        else:
+            x = x.contiguous().view(batch_size, src_len +size_to_add, -1)
+            x = x[:,size_to_add:,:]
+            if encoder_padding_mask is not None:
+                encoder_padding_mask = encoder_padding_mask.view(batch_size, -1)
+                encoder_padding_mask = encoder_padding_mask[:,size_to_add:]
+
+        x = x.transpose(0, 1)
+
+        # x = x.view(src_len-size_to_remove, batch_size, -1)
+
+        # import pdb;
+        # pdb.set_trace()
         if self.normalize:
             x = self.layer_norm(x)
         return {
